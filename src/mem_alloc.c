@@ -29,7 +29,8 @@ block_header *find_free_block(block_header **last, size_t size) {
   block_header *current = global_base;
 
   while (current && !(current->free && current->size >= size)) {
-    *last = current;         // this becomes the new head of the linked list
+    *last =
+        current; // this points to the very last valid block of the linked list
     current = current->next; // immediate next block
   }
 
@@ -88,7 +89,7 @@ void *my_malloc(size_t size) {
     }
   }
   pthread_mutex_unlock(&global_malloc_lock);
-  return (block + 1); // return pointer after metadata
+  return (block ? (block + 1) : NULL); // return pointer after metadata
 }
 
 block_header *get_block_addr(void *ptr) { return (block_header *)ptr - 1; }
@@ -138,12 +139,13 @@ void *my_realloc(void *ptr, size_t size) {
   }
 
   void *new_ptr;
+  size_t old_size = block_ptr->size;
   pthread_mutex_unlock(&global_malloc_lock);
   new_ptr = my_malloc(size);
   if (!new_ptr) {
     return NULL;
   }
-  memcpy(new_ptr, ptr, block_ptr->size);
+  memcpy(new_ptr, ptr, old_size);
   my_free(ptr);
   return new_ptr;
 }
