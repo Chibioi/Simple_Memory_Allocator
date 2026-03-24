@@ -3,16 +3,16 @@
 
 #include <stddef.h>
 
-// block header - provides info about the block
-typedef struct block_meta {
+// block block_header - provides info about the block
+typedef struct block_header {
   size_t size;
-  struct block_meta *next;
+  struct block_header *next;
   unsigned int free; // designating 0 as free and 1 as allocated
   int debug;
-} header;
+} block_header;
 
-header *find_free_block(header **last, size_t size);
-header *request_space(header *last, size_t size);
+block_header *find_free_block(block_header **last, size_t size);
+block_header *request_space(block_header *last, size_t size);
 void *my_malloc(size_t size);
 void my_free(void *ptr);
 void *my_realloc(void *ptr, size_t size);

@@ -1,3 +1,4 @@
+#include "mem_alloc.h"
 #include <assert.h>
 #include <pthread.h>
 #include <stddef.h>
@@ -7,53 +8,45 @@
 #include <string.h>
 #include <unistd.h>
 
-#define META_SIZE sizeof(header)
-#define BLOCK_FREE 0;
-#define BLOCK_ALLOCATED 1;
-#define MIN_BLOCK_SIZE 8;
+#define META_SIZE sizeof(struct block_header)
+#define BLOCK_FREE 0
+#define BLOCK_ALLOCATED 1
+#define MIN_BLOCK_SIZE 8
 
 pthread_mutex_t global_malloc_lock =
     PTHREAD_MUTEX_INITIALIZER; // Mutex lock for thread safety
 
-// block header - provides info about the block
-typedef struct block_meta {
-  size_t size;
-  struct block_meta *next;
-  unsigned int free; // designating 0 as free and 1 as allocated
-  int debug;
-} header;
-
 void *global_base = NULL; // head of the linked list
 
-header *find_free_block(header **last, size_t size);
-header *request_space(header *last, size_t size);
+block_header *find_free_block(block_header **last, size_t size);
+block_header *request_space(block_header *last, size_t size);
 void *my_malloc(size_t size);
 void my_free(void *ptr);
 void *my_realloc(void *ptr, size_t size);
 void *my_calloc(size_t no_of_elements, size_t size_of_elements);
 
-header *find_free_block(header **last, size_t size) {
-  header *current = global_base;
+block_header *find_free_block(block_header **last, size_t size) {
+  block_header *current = global_base;
 
   while (current && !(current->free && current->size >= size)) {
-    header *last = current;  // this becomes the new head of the linked list
+    *last = current;         // this becomes the new head of the linked list
     current = current->next; // immediate next block
   }
 
   return current;
 }
 
-header *request_space(header *last, size_t size) {
-  header *block;
-  block = sbrk(0);
-  void *request = sbrk(size + META_SIZE);
+block_header *request_space(block_header *last, size_t size) {
+  block_header *block;
+  // block = sbrk(0);
+  block = sbrk(size + META_SIZE);
 
-  if (request == (void *)-1) {
+  if (block == (void *)-1) {
     puts("sbrk() failed!!");
     return NULL;
   }
 
-  assert((void *)block == request);
+  // assert((void *)block == block);
   if (last) {
     last->next = block;
   }
@@ -67,7 +60,7 @@ header *request_space(header *last, size_t size) {
 }
 
 void *my_malloc(size_t size) {
-  header *block;
+  block_header *block;
   if (size <= 0) {
     return NULL;
   }
@@ -80,21 +73,32 @@ void *my_malloc(size_t size) {
     }
     global_base = block;
   } else {
-    block->free = BLOCK_ALLOCATED;
-    block->debug = 0x7777777;
+    block_header *last = global_base;
+    block = find_free_block(&last, size);
+    // If a suitable block is not found request new block
+    if (!block) {
+      block = request_space(last, size);
+      if (!block) {
+        pthread_mutex_unlock(&global_malloc_lock);
+        return NULL;
+      }
+    } else {
+      block->free = BLOCK_ALLOCATED;
+      block->debug = 0x7777777;
+    }
   }
   pthread_mutex_unlock(&global_malloc_lock);
-  return (block + 1);
+  return (block + 1); // return pointer after metadata
 }
 
-header *get_block_addr(void *ptr) { return (header *)ptr - 1; }
+block_header *get_block_addr(void *ptr) { return (block_header *)ptr - 1; }
 
 void my_free(void *ptr) {
   if (!ptr) {
     return;
   }
   pthread_mutex_lock(&global_malloc_lock);
-  header *block_ptr = get_block_addr(ptr);
+  block_header *block_ptr = get_block_addr(ptr);
   if (block_ptr->free != BLOCK_ALLOCATED) {
     pthread_mutex_unlock(&global_malloc_lock);
     return;
@@ -110,15 +114,15 @@ void *my_realloc(void *ptr, size_t size) {
     return my_malloc(size);
   }
   pthread_mutex_lock(&global_malloc_lock);
-  header *block_ptr = get_block_addr(ptr);
+  block_header *block_ptr = get_block_addr(ptr);
   if (block_ptr->size >= size) {
     size_t remaining = block_ptr->size - size;
 
     // Only split if the remainder can hold a new block
     if (remaining >= META_SIZE + MIN_BLOCK_SIZE) {
-      header *new_block =
-          (header *)((char *)(block_ptr + 1) +
-                     size); // this line generate an error due to void*
+      block_header *new_block =
+          (block_header *)((char *)(block_ptr + 1) +
+                           size); // this line generate an error due to void*
 
       new_block->size = remaining - META_SIZE;
       new_block->free = BLOCK_FREE;
