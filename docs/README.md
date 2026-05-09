@@ -121,9 +121,8 @@ Tests are written with **CUnit** and cover:
 
 ## Known Limitations
 
-- **No block coalescing** — adjacent free blocks are not merged, which can lead to fragmentation over time.
-- **`sbrk()` is not thread-safe** on all platforms and is deprecated on some systems (e.g. macOS). A production allocator would use `mmap()` instead.
-- The free list is a simple **singly linked list**; large heaps will have O(n) allocation time.
+- The free list is a simple **singly linked list**; large heaps will have O(n) allocation time. Doubly linked list can be implemented for O(1) coalescing.
+- find_free_block() uses the first-fit allocation algorithm but improvements can be made by implementing best-fit, AVL trees and segregated lists to improve reuse significantly.
 
 ---
 ## Updates
@@ -131,6 +130,8 @@ Tests are written with **CUnit** and cover:
 1. Added block coalescing to avoid fragmentation in memory.
 2. Added the macros ALIGN8(x) (((x) + 7) & ~7) for better memory alignment to improve CPU performance. 
 3. Added block splitting to my malloc()
+4. Implemented mmap() for large allocations while still keeping sbrk() for small alloactions making it thread-safe.
+
 ---
 ## License
 
