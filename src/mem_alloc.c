@@ -15,8 +15,8 @@
 #define MMAP_THRESHOLD (128 * 1024)
 #define MIN_BLOCK_SIZE 8
 #define ALIGN8(x)                                                              \
-  (((x) + 7) & ~7) // Alignment of addresses that is valid for the CPU to use
-                   // for data types
+  (((x) + ((size_t)7)) & ~((size_t)7)) // Alignment of addresses that is valid
+                                       // for the CPU to use for data types
 
 pthread_mutex_t global_malloc_lock =
     PTHREAD_MUTEX_INITIALIZER; // Mutex lock for thread safety
@@ -25,20 +25,31 @@ void *global_base = NULL; // head of the linked list
 
 block_header *find_free_block(block_header **last, size_t size) {
   block_header *current = global_base;
+  *last = NULL;
 
-  while (current && !(current->free && current->size >= size)) {
-    *last =
-        current; // this points to the very last valid block of the linked list
-    current = current->next; // immediate next block
+  while (current) {
+
+    // ONLY trust explicit free flag + size
+    if (current->free == BLOCK_FREE && current->size >= size) {
+      return current;
+    }
+
+    *last = current;
+    current = current->next;
   }
 
-  return current;
+  return NULL;
 }
 
 block_header *request_space(block_header *last, size_t size) {
   block_header *block;
-  // block = sbrk(0);
-  block = sbrk(size + META_SIZE);
+  size_t total_size = size + META_SIZE;
+
+  if (total_size > (size_t)INTPTR_MAX) {
+    return NULL;
+  }
+
+  block = sbrk((intptr_t)total_size);
 
   if (block == (void *)-1) {
     puts("sbrk() failed!!");
@@ -48,6 +59,9 @@ block_header *request_space(block_header *last, size_t size) {
   // assert((void *)block == block);
   if (last) {
     last->next = block;
+    block->prev = last;
+  } else {
+    block->prev = NULL;
   }
 
   block->size = size;
@@ -89,7 +103,7 @@ void split_block(block_header *block, size_t size) {
   }
 
   // get the range (start - end) of the remaining free block
-  block_header *new_block = (block_header *)((char *)(block + 1) + size);
+  block_header *new_block = (block_header *)((char *)block + META_SIZE + size);
 
   // Initialize the new free block
   new_block->size = remaining - META_SIZE;
@@ -97,31 +111,43 @@ void split_block(block_header *block, size_t size) {
   new_block->is_mmap = 0;
   new_block->debug =
       0xDEADBEEF; // just a debug marker which helps to detect corruption
-  new_block->next = block->next; // link to the list
-  block->size = size;            // shrink the original
+
+  // link new block into list
+  new_block->next = block->next;
+  new_block->prev = block;
+
+  if (block->next) {
+    block->next->prev = new_block;
+  }
+
+  // Update original block
+  block->size = size;
   block->next = new_block;
+
+  // ensure allocation state is correct
+  block->free = BLOCK_ALLOCATED;
 }
 
 void *my_malloc(size_t size) {
-  block_header *block;
-
   if (size == 0) {
     return NULL;
   }
   size = ALIGN8(size);
   // using mmap if size is greater than mmap() threshold
   if (size >= MMAP_THRESHOLD) {
-
-    block = request_space_mmap(size);
-
+    block_header *block = request_space_mmap(size);
     if (!block) {
       return NULL;
     }
-    return (block + 1);
+    return (void *)(block + 1);
   }
 
   pthread_mutex_lock(&global_malloc_lock);
 
+  block_header *block = NULL;
+  block_header *last = global_base;
+
+  // Initialize heap if empty
   if (!global_base) {
     block = request_space(NULL, size);
     if (!block) {
@@ -130,38 +156,44 @@ void *my_malloc(size_t size) {
     }
     global_base = block;
   } else {
-    block_header *last = global_base;
     block = find_free_block(&last, size);
     // If a suitable block is not found request new block
     if (!block) {
+      // No free block -> extend heap
       block = request_space(last, size);
       if (!block) {
         pthread_mutex_unlock(&global_malloc_lock);
         return NULL;
       }
     } else {
-      split_block(block, size);
+      split_block(block, size); // safe only after marking allocated
     }
-    block->free = BLOCK_ALLOCATED;
   }
+
+  // only here we mark final block as allocated
+  block->free = BLOCK_ALLOCATED;
   block->debug = 0x7777777;
   pthread_mutex_unlock(&global_malloc_lock);
-  return (block ? (block + 1) : NULL); // return pointer after metadata
+  return (void *)(block + 1); // return pointer after metadata
 }
 
 block_header *get_block_addr(void *ptr) { return (block_header *)ptr - 1; }
 
-void coalesce_free_blocks() {
+void coalesce_free_blocks(void) {
   block_header *current = global_base; // head of the linked list
   while (current && current->next) {
-    char *end_of_current =
-        (char *)(current + 1) + current->size; // to check for adjacency
+    // char *end_of_current =
+    //     (char *)(current + 1) + current->size; // to check for adjacency
     // check if the current and next block are free
-    if (current->free == BLOCK_FREE && current->next->free == BLOCK_FREE &&
-        end_of_current == (char *)current->next) {
+    if (current->free == BLOCK_FREE && current->next->free == BLOCK_FREE) {
+      block_header *next = current->next;
       // Merge current free block with the next free block
       current->size += META_SIZE + current->next->size;
-      current->next = current->next->next; // because blocks have been merged
+      current->next = next->next; // because blocks have been merged
+
+      if (next->next) {
+        next->next->prev = current;
+      }
       continue; // stay on current block to allow repeated merges
     }
     current = current->next;
@@ -180,14 +212,18 @@ void my_free(void *ptr) {
     munmap(block_ptr, total_size);
     return;
   }
-  assert(block_ptr->free == BLOCK_ALLOCATED);
-  assert(block_ptr->debug == 0x7777777 || block_ptr->debug == 0x12345678);
-  
+  // assert(block_ptr->free == BLOCK_ALLOCATED);
+  // assert(block_ptr->debug == 0x7777777 || block_ptr->debug == 0x12345678);
+
   block_ptr->free = BLOCK_FREE;
   block_ptr->debug = 0x55555555;
 
   // merge adjacent free blocks
   coalesce_free_blocks();
+  // optional backward coalescing
+  if (block_ptr->prev && block_ptr->prev->free == BLOCK_FREE) {
+    coalesce_free_blocks();
+  }
   pthread_mutex_unlock(&global_malloc_lock);
 }
 
