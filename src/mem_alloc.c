@@ -11,19 +11,23 @@
 #define META_SIZE sizeof(struct block_header)
 #define BLOCK_FREE 0
 #define BLOCK_ALLOCATED 1
+#define MMAP_THRESHOLD (128 * 1024)
 #define MIN_BLOCK_SIZE 8
+#define ALIGN8(x)                                                              \
+  (((x) + 7) & ~7) // Alignment of addresses that is valid for the CPU to use
+                   // for data types
 
 pthread_mutex_t global_malloc_lock =
     PTHREAD_MUTEX_INITIALIZER; // Mutex lock for thread safety
 
 void *global_base = NULL; // head of the linked list
 
-block_header *find_free_block(block_header **last, size_t size);
-block_header *request_space(block_header *last, size_t size);
-void *my_malloc(size_t size);
-void my_free(void *ptr);
-void *my_realloc(void *ptr, size_t size);
-void *my_calloc(size_t no_of_elements, size_t size_of_elements);
+// block_header *find_free_block(block_header **last, size_t size);
+// block_header *request_space(block_header *last, size_t size);
+// void *my_malloc(size_t size);
+// void my_free(void *ptr);
+// void *my_realloc(void *ptr, size_t size);
+// void *my_calloc(size_t no_of_elements, size_t size_of_elements);
 
 block_header *find_free_block(block_header **last, size_t size) {
   block_header *current = global_base;
@@ -60,8 +64,32 @@ block_header *request_space(block_header *last, size_t size) {
   return block;
 }
 
+// take one free block and split it into an allocated block and a remaining free
+// block
+void split_block(block_header *block, size_t size) {
+  size_t remaining = block->size - size;
+
+  // not enough room for another block
+  if (remaining < META_SIZE + MIN_BLOCK_SIZE) {
+    return;
+  }
+
+  // get the range (start - end) of the remaining free block
+  block_header *new_block = (block_header *)((char *)(block + 1) + size);
+
+  // Initialize the new free block
+  new_block->size = size - META_SIZE;
+  new_block->free = BLOCK_FREE;
+  new_block->debug =
+      0xDEADBEEF; // just a debug marker which helps to detect corruption
+  new_block->next = block->next; // link to the list
+  block->size = size;            // shrink the original
+  block->next = new_block;
+}
+
 void *my_malloc(size_t size) {
   block_header *block;
+  size = ALIGN8(size);
   if (size <= 0) {
     return NULL;
   }
@@ -84,6 +112,7 @@ void *my_malloc(size_t size) {
         return NULL;
       }
     } else {
+      split_block(block, size);
       block->free = BLOCK_ALLOCATED;
       block->debug = 0x7777777;
     }
@@ -93,6 +122,23 @@ void *my_malloc(size_t size) {
 }
 
 block_header *get_block_addr(void *ptr) { return (block_header *)ptr - 1; }
+
+void coalesce_free_blocks() {
+  block_header *current = global_base; // head of the linked list
+  while (current && current->next) {
+    char *end_of_current =
+        (char *)(current + 1) + current->size; // to check for adjacency
+    // check if the current and next block are free
+    if (current->free == BLOCK_FREE && current->next->free == BLOCK_FREE &&
+        end_of_current == (char *)current->next) {
+      // Merge current free block with the next free block
+      current->size += META_SIZE + current->next->size;
+      current->next = current->next->next; // because blocks have been merged
+      continue; // stay on current block to allow repeated merges
+    }
+    current = current->next;
+  }
+}
 
 void my_free(void *ptr) {
   if (!ptr) {
@@ -107,10 +153,14 @@ void my_free(void *ptr) {
   assert(block_ptr->debug == 0x7777777 || block_ptr->debug == 0x12345678);
   block_ptr->free = BLOCK_FREE;
   block_ptr->debug = 0x55555555;
+
+  // merge adjacent free blocks
+  coalesce_free_blocks();
   pthread_mutex_unlock(&global_malloc_lock);
 }
 
 void *my_realloc(void *ptr, size_t size) {
+  size = ALIGN8(size);
   if (!ptr) {
     return my_malloc(size);
   }

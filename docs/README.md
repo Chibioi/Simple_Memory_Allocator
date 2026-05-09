@@ -126,7 +126,12 @@ Tests are written with **CUnit** and cover:
 - The free list is a simple **singly linked list**; large heaps will have O(n) allocation time.
 
 ---
+## Updates
 
+1. Added block coalescing to avoid fragmentation in memory.
+2. Added the macros ALIGN8(x) (((x) + 7) & ~7) for better memory alignment to improve CPU performance. 
+3. Added block splitting to my malloc()
+---
 ## License
 
 This project is for educational purposes.
